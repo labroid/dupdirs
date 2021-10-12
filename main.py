@@ -12,22 +12,7 @@ import pandas as pd
 target_dir = r"C:\Users\Scott\Pictures\Saved Pictures"
 
 
-def main():
-    g = DeDup()
-    g.scan_filesystem(target_dir)
-    g.find_dups()
-    current_group = None
-    while True:
-        menu = g.next_group(current_group)
-        if menu is None:
-            print("Done")
-            break
-        print(menu.group, menu.choices)
-        current_group = menu.group
-    print("REally done")
-
-
-def control():
+def control(g):
     """
     User choices:
     - Confirm list of dirs to scan [future]
@@ -40,7 +25,43 @@ def control():
     - Count priority ordering
     - Quit
     """
-    pass
+    # Confirm directory list here
+    g.scan_filesystem(target_dir)
+    g.find_dups()
+    current_group = None
+    while True:
+        header, current_group, choices = g.next_group(current_group)
+        if header is None:
+            print("Done")
+            break
+        print(f"Group {current_group}. {header}")
+        for n, c in enumerate(choices):
+            print(f"{n}: {c}")
+        prompt_string = "Enter (#) to keep, (N)ext, (Q)uit, (P)urge, (D)elete empty dirs, (S)ize order, (C)ount order"
+        user_choices = 'nqpdsc'
+        option, choice = get_user_response(prompt_string, user_choices, range(1, len(choices) + 1))
+        if option == 'n':
+            continue
+        if option == 'q':
+            #check for files to purge
+            break
+        if option == 'p':
+            #purge()  # TODO:  Implement purge
+            g.find_dups()
+            continue
+        if option == 'd':
+            print(f"Removed {remove_empty_dirs()} empty dirs\nRecomputing duplicates.")
+            g.find_dups()
+            continue
+        if option == 's':
+            g.priority = 'size'
+            print("Setting sort priority to size...")
+            continue
+        if option == 'c':
+            g.priority = 'count'
+            print("Group priority set to count.")
+            continue
+    print("Done")
 
 
 class DeDup:
@@ -61,6 +82,7 @@ class DeDup:
             {
                 'path': f,
                 'node_size': f.stat().st_size if f.is_file() else 0,  # TODO:  Is this necessary? Dir 0 anyway?
+                'hash': '',
                 'purge': False,
             }
             for f in itertools.chain(Path(roots).glob('**/*'), [Path(roots)])  # TODO: Support list of target_dir
@@ -68,7 +90,7 @@ class DeDup:
         ]
         print(f"Total files: {len(files)}")
         self.fileset = pd.DataFrame(files)
-        return None
+        return None, None, None
 
     def find_dups(self):
         """
@@ -80,9 +102,8 @@ class DeDup:
         self.f = self.fileset[~self.fileset.purge]
         self.f = self.f[self.f.duplicated('node_size', keep=False)].copy()
         print(f"Potential duplicate files (same size): {self.f.shape[0]}. Computing MD5 sums...")
-        self.f['hash'] = self.f['path'].apply(
-            lambda p: md5(p.read_bytes()).hexdigest()  # TODO:  Unless already exists
-        )  # TODO: Handle large files differently
+        no_hash = self.f.hash == ''
+        self.f.loc[no_hash, 'hash'] = self.f.loc[no_hash].apply(self.hasher)
         self.f = self.f[self.f['hash'].duplicated(keep=False)].copy()  # TODO: Is there a way to tell if copy is needed?
         print(f"Duplicated files found: {self.f.shape[0]}")
         self.f['parent'] = self.f.path.apply(lambda p: p.parent)
@@ -124,7 +145,9 @@ class DeDup:
         current_group = current_group or 0
         current_group += 1
         if current_group in range(1, len(self.groups) + 1):
-            return self.groups.loc[current_group - 1, ['group', 'choices']]
+            header = f"Duplicates Remaining: {self.f.shape[0]}"
+            group_data = self.groups.loc[current_group - 1, ['group', 'choices']]
+            return header, group_data.group, group_data.choices
         return None
 
     def dup_marker(self, group, choice):
@@ -143,6 +166,24 @@ class DeDup:
         :return: Number of files (and bytes?) deleted
         """
         pass
+
+    def hasher(self, record):
+        """
+        Compute hash based on file size to avoid running out of memory
+        :param record: Record for a file containing "path" element
+        :return: hash:
+        """
+        if record.node_size <= 100e6:
+            return md5(record.path.read_bytes()).hexdigest()
+        BUF_SIZE = 65536
+        hash = md5()
+        with record.path.open(mode='rb') as f:
+            while True:
+                data = f.read(BUF_SIZE)
+                if not data:
+                    break
+                hash.update(data)
+        return hash.hexdigest()
 
     # f = f.set_index(['dups', 'parent', 'hash'])
     # for group in f.index.unique('dups'):
@@ -177,21 +218,15 @@ class DeDup:
     #                 print(f"{n} keep {d.name}")
 
 
-# def get_input(max_int, letters):
-#     while True:
-#         choice = input("Enter # to keep, N for next group, Q to quit, D to clear empty dir trees and quit").lower()
-#         if choice in letters:
-#             return choice
-#         if choice.isnumeric():
-#             if int(choice) <= max_int:
-#                 return int(choice)
+def get_user_response(prompt_string, user_choices, choice_range):
+    while True:
+        choice = input(prompt_string).lower()
+        if choice in user_choices:
+            return choice, None
+        if choice.isnumeric() and int(choice) in choice_range:
+            return None, int(choice)
 
 
-#
-# def control():
-#     while True:
-
-#
 #     if choice == 'q':
 #         break
 #     if choice == 'n':
@@ -275,5 +310,6 @@ def get_tree_df(target_dir):  # TODO: Expand target_dir to take list of dirs and
 
 
 if __name__ == '__main__':
-    main()
-    print("Done")
+    g = DeDup()
+    control(g)
+    print("Goodbye")
