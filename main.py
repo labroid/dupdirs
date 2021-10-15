@@ -1,18 +1,15 @@
 import itertools
 import os
-import sys
 from hashlib import md5
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
-# from rich import print
-
 target_dir = r"C:\Users\Scott\Pictures\Saved Pictures"
+# TODO:  Implement CLI
 
 
-def control(g):
+def control():
     """
     User choices:
     - Confirm list of dirs to scan [future]
@@ -25,72 +22,111 @@ def control(g):
     - Count priority ordering
     - Quit
     """
-    # Confirm directory list here
-    g.scan_filesystem(target_dir)
-    g.find_dups()
+    # Gather/approve list of target dirs here
+    g = DeDup(target_dir)
     current_group = None
+    quit_count = 0
     while True:
-        header, current_group, choices = g.next_group(current_group)
-        if header is None:
-            print("Done")
-            break
-        print(f"Group {current_group}. {header}")
-        for n, c in enumerate(choices):
+        current_group, choices = g.next_group(current_group)
+        if current_group is None:
+            print("===End of duplicate groups===")
+            g.dup_purge()
+            continue
+        for n, c in enumerate(choices, start=1):
             print(f"{n}: {c}")
         prompt_string = "Enter (#) to keep, (N)ext, (Q)uit, (P)urge, (D)elete empty dirs, (S)ize order, (C)ount order"
-        user_choices = 'nqpdsc'
-        option, choice = get_user_response(prompt_string, user_choices, range(1, len(choices) + 1))
-        if option == 'n':
+        choice = input(prompt_string).lower()
+        if choice == 'n':
             continue
-        if option == 'q':
-            #check for files to purge
-            break
-        if option == 'p':
-            #purge()  # TODO:  Implement purge
+        if choice == 'q':
+            quit_count += 1
+            if g.f.purge.sum() <= 0:
+                break
+            if quit_count == 2:
+                break
+            print(f"Warning: There are {g.f.purge.sum()} files marked to purge. Choose (Q)uit again to abandon.")
+        if choice == 'p':
+            g.dup_purge()
             g.find_dups()
             continue
-        if option == 'd':
-            print(f"Removed {remove_empty_dirs()} empty dirs\nRecomputing duplicates.")
+        if choice == 'd':
+            print(f"Removing empty dirs and recomputing duplicates.")
+            remove_empty_dirs()
             g.find_dups()
             continue
-        if option == 's':
-            g.priority = 'size'
-            print("Setting sort priority to size...")
+        if choice == 's':
+            print("Priority sorting not implemented")
+            # g.priority = 'sum'
+            # Call some function that re-sorts the groups array
+            # print("Setting sort priority to size...")
             continue
-        if option == 'c':
-            g.priority = 'count'
-            print("Group priority set to count.")
+        if choice == 'c':
+            print("Priority sorting not implemented")
+            # g.priority = 'count'
+            # Call some function that re-sorts the groups array
+            # print("Group priority set to count.")
             continue
+        if choice.isnumeric() and (1 <= int(choice) <= len(choices)):
+            g.mark_group(current_group, int(choice) - 1)
     print("Done")
 
 
 class DeDup:
-    def __init__(self):
-        self.roots = None
+    def __init__(self, roots):
+        self.roots = roots
         self.f = None
+        self.t = None
         self.fileset = None
         self.groups = None
-        self.priority = 'size'
+        self.priority = 'sum'
         self.verbose = False  # TODO: Implement in print statements
+        self.scan_filesystem()
+        self.hash_potential_duplicates()
+        self.find_dups()
 
-    def scan_filesystem(self, roots=None):  # roots are a list of Path
+    def scan_filesystem(self):
         """
-        Scans filesystem and recomputes duplicate groups
+        Scans filesystem and creates dataframe for deduplication
         """
         print("Scanning in filesystem tree...")
         files = [
             {
                 'path': f,
-                'node_size': f.stat().st_size if f.is_file() else 0,  # TODO:  Is this necessary? Dir 0 anyway?
-                'hash': '',
+                'node_size': f.stat().st_size if f.is_file() else 0,
                 'purge': False,
             }
-            for f in itertools.chain(Path(roots).glob('**/*'), [Path(roots)])  # TODO: Support list of target_dir
+            for f in itertools.chain(
+                Path(self.roots).glob('**/*'), [Path(self.roots)]
+            )  # TODO: Support list of target_dir
             if f.is_file()
         ]
         print(f"Total files: {len(files)}")
-        self.fileset = pd.DataFrame(files)
-        return None, None, None
+        self.f = pd.DataFrame(files)
+        return None
+
+    def hash_potential_duplicates(self):
+        def hasher(record):
+            """
+            Compute hash based on file size to avoid running out of memory
+            :param record: Record for a file containing "path" element
+            :return: hash:
+            """
+            if record.node_size <= 100e6:
+                return md5(record.path.read_bytes()).hexdigest()
+            BUF_SIZE = 65536
+            hash = md5()
+            with record.path.open(mode='rb') as f:
+                while True:
+                    data = f.read(BUF_SIZE)
+                    if not data:
+                        break
+                    hash.update(data)
+            return hash.hexdigest()
+
+        self.f = self.f[self.f.duplicated('node_size', keep=False)].copy()
+        print(f"Potential duplicate files (same size): {self.f.shape[0]}. Computing MD5 sums...")
+        self.f['hash'] = self.f.apply(hasher, axis=1)
+        self.f['parent'] = self.f.path.apply(lambda p: p.parent)
 
     def find_dups(self):
         """
@@ -99,41 +135,41 @@ class DeDup:
         order by filecount or totalsize as user cofigured
         :return:
         """
-        self.f = self.fileset[~self.fileset.purge]
-        self.f = self.f[self.f.duplicated('node_size', keep=False)].copy()
-        print(f"Potential duplicate files (same size): {self.f.shape[0]}. Computing MD5 sums...")
-        no_hash = self.f.hash == ''
-        self.f.loc[no_hash, 'hash'] = self.f.loc[no_hash].apply(self.hasher)
-        self.f = self.f[self.f['hash'].duplicated(keep=False)].copy()  # TODO: Is there a way to tell if copy is needed?
-        print(f"Duplicated files found: {self.f.shape[0]}")
-        self.f['parent'] = self.f.path.apply(lambda p: p.parent)
-        hashgroups = self.f.groupby('hash')['parent'].apply(lambda x: tuple(sorted(set(x))))
-        self.f['dups'] = hashgroups[self.f.hash].values
-
-        dup_dirs = self.f.groupby('dups').filter(lambda x: len(set(x.parent)) > 1)
-        dup_files = self.f.groupby('dups').filter(lambda x: len(set(x.parent)) == 1)
-        groups = dup_dirs.groupby('dups')['node_size'].agg([len, sum]).reset_index().rename(columns={'dups': 'choices'})
-        groups['is_dir'] = True
-        file_choices = (
-            dup_files.groupby('hash').apply(lambda x: tuple(x.path)).reset_index().rename(columns={0: 'choices'})
-        )
-        file_groups = (
-            dup_files.groupby(['parent', 'hash'])['node_size']
-            .agg([len, sum])
-            .reset_index()
-            .merge(file_choices, on='hash')
-            .drop(columns=['parent', 'hash'])
-        )
-        file_groups['is_dir'] = False
-        groups = (
-            groups.append(file_groups)
-            .sort_values('sum', ascending=False)
-            .reset_index(drop=True)
-            .reset_index()
-            .rename(columns={'index': 'group'})
-        )
-        groups['group'] = groups.group + 1
-        self.groups = groups
+        self.t = self.f.loc[~self.f.purge]
+        if not len(self.t):
+            return None
+        self.t = self.t[self.t.hash.duplicated(keep=False)].copy()
+        hashgroups = self.t.groupby('hash')['parent'].apply(lambda x: tuple(sorted(set(x))))
+        self.t['dups'] = hashgroups[self.t.hash].values
+        dup_dirs = self.t.groupby('dups').filter(lambda x: len(set(x.parent)) > 1)
+        if len(dup_dirs) == 0:
+            self.groups = pd.DataFrame()
+        else:
+            self.groups = (
+                dup_dirs.groupby('dups')['node_size']
+                .agg([len, sum])
+                .reset_index()
+                .rename(columns={'dups': 'choices', 'len': 'count'})
+            )
+            self.groups['is_dir'] = True
+        dup_files = self.t.groupby('dups').filter(lambda x: len(set(x.parent)) == 1)
+        if len(dup_files != 0):
+            file_choices = (
+                dup_files.groupby('hash')
+                .apply(lambda x: tuple(x.path))
+                .reset_index()
+                .rename(columns={0: 'choices'})  # TODO: May be no dup files
+            )
+            file_groups = (
+                dup_files.groupby(['parent', 'hash'])['node_size']
+                .agg([len, sum])
+                .reset_index()
+                .merge(file_choices, on='hash')
+                .drop(columns=['parent', 'hash'])
+                .rename(columns={'len': 'count'})
+            )
+            file_groups['is_dir'] = False
+            self.groups = self.groups.append(file_groups)
         return None
 
     def next_group(self, current_group: int = 0):
@@ -142,167 +178,75 @@ class DeDup:
         Generates summary header
         :return: header, choices or Header, None on end of duplicates
         """
+        if len(self.groups) == 0:
+            return None, None
         current_group = current_group or 0
-        current_group += 1
-        if current_group in range(1, len(self.groups) + 1):
-            header = f"Duplicates Remaining: {self.f.shape[0]}"
-            group_data = self.groups.loc[current_group - 1, ['group', 'choices']]
-            return header, group_data.group, group_data.choices
-        return None
+        if 0 > current_group > len(self.groups) - 1:
+            return None, None
+        self.groups = self.groups.sort_values(self.priority, ascending=False)  # TODO: Crashes when groups is empty
+        return current_group, (self.groups.iloc[current_group]['choices'])
 
-    def dup_marker(self, group, choice):
+    def mark_group(self, group, choice):
         """
         Remover takes group and choice and marks files for deletion
         if choice is dir, mark files in other dirs of same group
         if choice is file, mark other files of same checksum
-        :returns number marked
+        :returns None
         """
-        pass
+        g = self.groups.iloc[group, :]
+        purge_items = g.choices[:choice] + g.choices[choice + 1:]
+        if g.is_dir:
+            self.f.loc[self.f.isin({'dups': g.choices, 'parent': purge_items}).parent, 'purge'] = True
+        else:
+            self.f.loc[self.f.path.isin(purge_items), 'purge'] = True
+        self.find_dups()
+        return None
 
     def dup_purge(self):
         """
         Delete files marked as duplicate
-        offer confirmation with (at least) count of files
+        offer confirmation with (at least) count of files and check that all checksums are accounted for
         :return: Number of files (and bytes?) deleted
         """
-        pass
+        original_hashes = set(self.f.hash)
+        unpurged_hashes = set(self.f.loc[~self.f.purge, 'hash'])
+        if len(original_hashes ^ unpurged_hashes) != 0:
+            print("Whoa! Some content is deleted in all places. Not going to purge.")
 
-    def hasher(self, record):
-        """
-        Compute hash based on file size to avoid running out of memory
-        :param record: Record for a file containing "path" element
-        :return: hash:
-        """
-        if record.node_size <= 100e6:
-            return md5(record.path.read_bytes()).hexdigest()
-        BUF_SIZE = 65536
-        hash = md5()
-        with record.path.open(mode='rb') as f:
-            while True:
-                data = f.read(BUF_SIZE)
-                if not data:
-                    break
-                hash.update(data)
-        return hash.hexdigest()
-
-    # f = f.set_index(['dups', 'parent', 'hash'])
-    # for group in f.index.unique('dups'):
-    #     if len(group) > 1:
-    #         x = {'group': group, 'choices': list(f.loc[group].index.unique('parent'))}
-    #     else:
-    #         x = {'group': group, 'choices': list(f.loc[group].index.unique('hash'))}
-    # # for group in f.index.get_level_values('dups'):
-    # #     for dirs in f.index.get_level_values('parent'):
-    # #         print(f"Group {group}, directory {dirs}, list of files {f.loc[group].loc[dirs].path}")
-    #
-    # dir_dups = dup_sets.size()
-    # priority = dup_sets.count()['hash'].sort_values(ascending=False)
-    # for dirs, count in priority.items():
-    #     # f.loc[dup_sets.groups[priority.index[3]], :]
-    #     # show dirs or files
-    #     # allow to move on to next
-    #     # recompute if anything marked for deletion
-    #     if len(dirs) > 1:
-    #         print("=========================")
-    #         print(f"Total duplicates remaining: {priority.sum()}, {count} are BETWEEN these directories")
-    #         for n, d in enumerate(dirs, start=1):
-    #             print(f"{n} keep {d}")
-    #     else:
-    #         filegroups = f[f.dups == dirs].groupby('hash')
-    #         for group in filegroups:
-    #             print("=========================")
-    #             print(
-    #                 f"Total duplicates remaining: {priority.sum()}, {len(group[1])} are duplicates WITHIN a directory"
-    #             )
-    #             for n, d in enumerate(group[1].path, start=1):
-    #                 print(f"{n} keep {d.name}")
+        purge_targets = self.f.loc[self.f.purge, 'path']
+        print(f"There are {purge_targets} files to purge. Purge?")
+        # response, _ = get_user_response('Purge? (Y/N)'):
+        # if response ==
+        # # TODO: Get response here
+        # print(f"Attempting to purge {len(purge_targets)} files")
+        # for path in purge_targets:
+        #     try:
+        #         print(f"Deleting: {path}")
+        #     except Exception as e:  # TODO:  Too broad; figure out delete failures
+        #         print(f"Skipping {path} because of error: {e}")
 
 
-def get_user_response(prompt_string, user_choices, choice_range):
-    while True:
-        choice = input(prompt_string).lower()
-        if choice in user_choices:
-            return choice, None
-        if choice.isnumeric() and int(choice) in choice_range:
-            return None, int(choice)
-
-
-#     if choice == 'q':
-#         break
-#     if choice == 'n':
-#         continue
-#     if choice == 'd':
-#         print(f"Deleting empty dirs")  # TODO: Call clean up empty dir trees
-#         break
-#     pick = int(choice)
-#         print(f"Keeping {dirs[pick-1]}")
-#         print(f"Purging {dirs[:pick-1] + dirs[pick:]}")
-#     print("Done")
-#     sys.exit(0)
-#     print("The following are directories with the same content, starting from highest in the filesystem tree.")
-#     print("Choose a number to mark for deletion.")
-#     for parent, group in candidates:
-#         print("-----------------------")
-#         print(f"Parent: {parent}")
-#         new_ui(group.path)
-#
-#     # Have user process directories that are largely duplicated as a subset of some other directory
-#     # Find directories with high percentage of duplicated files and identify other dir holding the duplicates
-#     # Go through each dir and find high-percentage duplicates
-#     candidates = f.loc[f.is_file, :].groupby(lambda p: p.parent)
-#     for parent, group in candidates:
-#         if parent in [Path(r'c:\Users'), Path(r'c:\Users\Scott\Pictures')]:
-#             continue
-#         fraction = group.hash_dup.sum() / group.shape[0]
-#         if fraction < 1:
-#             continue
-#         print("-----------------")
-#         print(f"{fraction:.1%} of {parent} is duplicated elsewhere")
-#         parentfilecount = len(list(parent.glob('*')))
-#         # Get all paths containing each file in the high-percent duplicate folder, group by parent directories
-#
-#     hostgroups = f.loc[f.is_file & f.loc[f.is_file, 'hash'].isin(group.hash)].groupby(lambda p: p.parent)
-#     for hostdir, hostmatch in hostgroups:
-#         if hostdir == parent:
-#             continue
-#         hostfilecount = len(list(Path(hostdir).glob('*')))
-#         if all(group.hash.isin(hostmatch.hash)):
-#             print(f"All {parentfilecount} files of {parent} are in the {hostfilecount} files of {hostdir}")
-#         else:
-#             print(f"NOT all {parentfilecount} files of {parent}  are in the {hostfilecount} files of {hostdir}")
-#     new_ui([parent])
-#
-#     # Now work through individual files
-#     candidates = (
-#         f.loc[f.is_file & f.hash_dup].sort_values(['node_size', 'path'], axis='index', ascending=False).groupby('hash')
-#     )
-#     print("The following are individual files that need to be considered:")
-#     for parent, group in candidates:
-#         print("----------------")
-#         print(f"Duplicated file: {parent}")
-#         new_ui(candidates.path)
-#
-#     # TODO: Convert to mark files to delete
-#     # TODO: Confirm that all hashes about to be deleted exist somewhere
-#     print("Done!")
-#
-#
+# def get_user_response(prompt_string, valid_choices):
+#     while True:
+#         choice = input(prompt_string).lower()
+#         if choice in valid_choices:
+#             return choice, None
+#         if choice.isnumeric():
+#             return None, int(choice)
 
 
 def remove_empty_dirs():
     """
     Removes empty dirs and announces number of dirs removed
-    :returns Number of dirs removed
+    :returns Number of dirs removed  TODO: Implement return value
     """
     [os.removedirs(p) for p in Path(target_dir).glob('**/*') if p.is_dir() and len(list(p.iterdir())) == 0]
+    return None
 
 
 def get_tree_df(target_dir):  # TODO: Expand target_dir to take list of dirs and files
     files = [
-        {
-            'path': f,
-            'node_size': f.stat().st_size if f.is_file() else 0,
-        }
+        {'path': f, 'node_size': f.stat().st_size if f.is_file() else 0}
         for f in itertools.chain(Path(target_dir).glob('**/*'), [Path(target_dir)])
         if f.is_file()
     ]
@@ -310,6 +254,5 @@ def get_tree_df(target_dir):  # TODO: Expand target_dir to take list of dirs and
 
 
 if __name__ == '__main__':
-    g = DeDup()
-    control(g)
+    control()
     print("Goodbye")
