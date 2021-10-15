@@ -1,5 +1,6 @@
 import itertools
 import os
+import sys
 from hashlib import md5
 from pathlib import Path
 
@@ -24,56 +25,53 @@ def control():
     """
     # Gather/approve list of target dirs here
     g = DeDup(target_dir)
-    current_group = None
     quit_count = 0
     while True:
-        current_group, choices = g.next_group(current_group)
-        if current_group is None:
+        print("==========")
+        choices = g.next_group()
+        if choices is None:
             print("===End of duplicate groups===")
-            g.dup_purge()
-            continue
-        for n, c in enumerate(choices, start=1):
-            print(f"{n}: {c}")
+            print(f"Duplicates remaining: {len(g.f) - g.f.purge.sum()}")
+        else:
+            this_group = g.groups.iloc[g.group]
+            print(f"Duplicates remaining: {len(g.f) - g.f.purge.sum()}. This group contains {this_group['count']} files of {this_group['sum']/2**20:.2f} MB")
+            for n, c in enumerate(choices, start=1):
+                print(f"{n}: {c}")
         prompt_string = "Enter (#) to keep, (N)ext, (Q)uit, (P)urge, (D)elete empty dirs, (S)ize order, (C)ount order"
         choice = input(prompt_string).lower()
-        if choice == 'n':
-            continue
         if choice == 'q':
             quit_count += 1
             if g.f.purge.sum() <= 0:
                 break
             if quit_count == 2:
                 break
-            print(f"Warning: There are {g.f.purge.sum()} files marked to purge. Choose (Q)uit again to abandon.")
-        if choice == 'p':
+            print(f"Warning: There are {g.f.purge.sum()} files marked to purge. Purge using (P)urge or press (Q)uit again to abandon.")
+        elif choice == 'n':
+            pass
+        elif choice == 'p':
             g.dup_purge()
             g.find_dups()
-            continue
-        if choice == 'd':
+        elif choice == 'd':
             print(f"Removing empty dirs and recomputing duplicates.")
             remove_empty_dirs()
             g.find_dups()
-            continue
-        if choice == 's':
-            print("Priority sorting not implemented")
-            # g.priority = 'sum'
-            # Call some function that re-sorts the groups array
-            # print("Setting sort priority to size...")
-            continue
-        if choice == 'c':
-            print("Priority sorting not implemented")
-            # g.priority = 'count'
-            # Call some function that re-sorts the groups array
-            # print("Group priority set to count.")
-            continue
+        elif choice == 's':
+            print("Sorting by duplicate size.")
+            g.priority = 'sum'
+            g.find_dups()
+        elif choice == 'c':
+            print("Sorting by duplicate count.")
+            g.priority = 'count'
+            g.find_dups()
         if choice.isnumeric() and (1 <= int(choice) <= len(choices)):
-            g.mark_group(current_group, int(choice) - 1)
+            g.mark_group(int(choice) - 1)
     print("Done")
 
 
 class DeDup:
     def __init__(self, roots):
         self.roots = roots
+        self.group = 0
         self.f = None
         self.t = None
         self.fileset = None
@@ -135,6 +133,7 @@ class DeDup:
         order by filecount or totalsize as user cofigured
         :return:
         """
+        self.group = -1
         self.t = self.f.loc[~self.f.purge]
         if not len(self.t):
             return None
@@ -158,7 +157,7 @@ class DeDup:
                 dup_files.groupby('hash')
                 .apply(lambda x: tuple(x.path))
                 .reset_index()
-                .rename(columns={0: 'choices'})  # TODO: May be no dup files
+                .rename(columns={0: 'choices'})
             )
             file_groups = (
                 dup_files.groupby(['parent', 'hash'])['node_size']
@@ -172,28 +171,27 @@ class DeDup:
             self.groups = self.groups.append(file_groups)
         return None
 
-    def next_group(self, current_group: int = 0):
+    def next_group(self):
         """
-        Manages returns group and choices for each duplicate group
-        Generates summary header
-        :return: header, choices or Header, None on end of duplicates
+        Manages returns choices for each duplicate group
+        :return: choices, None on end of duplicate groups
         """
+        self.group += 1
         if len(self.groups) == 0:
-            return None, None
-        current_group = current_group or 0
-        if 0 > current_group > len(self.groups) - 1:
-            return None, None
-        self.groups = self.groups.sort_values(self.priority, ascending=False)  # TODO: Crashes when groups is empty
-        return current_group, (self.groups.iloc[current_group]['choices'])
+            return None
+        if self.group < 0 or self.group > (len(self.groups) - 1):
+            return None
+        self.groups = self.groups.sort_values(self.priority, ascending=False)
+        return self.groups.iloc[self.group]['choices']
 
-    def mark_group(self, group, choice):
+    def mark_group(self, choice):
         """
         Remover takes group and choice and marks files for deletion
         if choice is dir, mark files in other dirs of same group
         if choice is file, mark other files of same checksum
         :returns None
         """
-        g = self.groups.iloc[group, :]
+        g = self.groups.iloc[self.group, :]
         purge_items = g.choices[:choice] + g.choices[choice + 1:]
         if g.is_dir:
             self.f.loc[self.f.isin({'dups': g.choices, 'parent': purge_items}).parent, 'purge'] = True
@@ -211,46 +209,32 @@ class DeDup:
         original_hashes = set(self.f.hash)
         unpurged_hashes = set(self.f.loc[~self.f.purge, 'hash'])
         if len(original_hashes ^ unpurged_hashes) != 0:
-            print("Whoa! Some content is deleted in all places. Not going to purge.")
-
+            print("Whoa! Some content is deleted in all places. Risk of data loss - not going to purge. Sorry.")
+            sys.exit(1)
         purge_targets = self.f.loc[self.f.purge, 'path']
-        print(f"There are {purge_targets} files to purge. Purge?")
-        # response, _ = get_user_response('Purge? (Y/N)'):
-        # if response ==
-        # # TODO: Get response here
-        # print(f"Attempting to purge {len(purge_targets)} files")
-        # for path in purge_targets:
-        #     try:
-        #         print(f"Deleting: {path}")
-        #     except Exception as e:  # TODO:  Too broad; figure out delete failures
-        #         print(f"Skipping {path} because of error: {e}")
-
-
-# def get_user_response(prompt_string, valid_choices):
-#     while True:
-#         choice = input(prompt_string).lower()
-#         if choice in valid_choices:
-#             return choice, None
-#         if choice.isnumeric():
-#             return None, int(choice)
-
+        print(f"There are {len(purge_targets)} files to purge. Purge?")
+        while True:
+            response = input("Purge? (Y/N)").lower()
+            if response == 'n':
+                return False
+            if response == 'y':
+                print(f"Attempting to purge {len(purge_targets)} files")
+                for path in purge_targets:
+                    try:
+                        print(f"Deleting: {path}")
+                    except Exception as e:  # TODO:  Too broad; figure out delete failures
+                        print(f"Skipping {path} because of error: {e}")
+                return True
 
 def remove_empty_dirs():
     """
     Removes empty dirs and announces number of dirs removed
-    :returns Number of dirs removed  TODO: Implement return value
+    :returns None
     """
+    print("Removing empty directories...", end='')
     [os.removedirs(p) for p in Path(target_dir).glob('**/*') if p.is_dir() and len(list(p.iterdir())) == 0]
+    print("Done.")
     return None
-
-
-def get_tree_df(target_dir):  # TODO: Expand target_dir to take list of dirs and files
-    files = [
-        {'path': f, 'node_size': f.stat().st_size if f.is_file() else 0}
-        for f in itertools.chain(Path(target_dir).glob('**/*'), [Path(target_dir)])
-        if f.is_file()
-    ]
-    return pd.DataFrame(files)
 
 
 if __name__ == '__main__':
