@@ -1,56 +1,69 @@
 import itertools
 import os
+import pathlib
 import sys
 from hashlib import md5
 from pathlib import Path
 
 import pandas as pd
+from typing import List
 
-target_dir = r"C:\Users\Scott\Pictures\Saved Pictures"
+target_dirs = [r"C:\Users\Scott\Pictures\Saved Pictures"]
+
+
+# target_dirs = [
+#     r"C:\Users\Scott\Pictures\2016-07-01 for Scott to Deal With",
+#     r"C:\Users\Scott\Pictures\Pictures for Droid",
+#     r"C:\Users\Scott\Pictures\Saved Pictures",
+# ]
 # TODO:  Implement CLI
 
 
 def control():
     """
-    User choices:
-    - Confirm list of dirs to scan [future]
-    - # of duplicate to keep from list
-    - Next set of duplicates
-    - Purge duplicates
-    - Delete empty dirs
-    - Restart scan
-    - Size prioity ordering
-    - Count priority ordering
-    - Quit
+    Provides interactive user interface to the application.
     """
     # Gather/approve list of target dirs here
-    g = DeDup(target_dir)
+    g = DeDup(target_dirs)
     quit_count = 0
     while True:
-        print("==========")
+        print("==========")  # TODO: Make this look better on quit while files left to purge
         choices = g.next_group()
         if choices is None:
             print("===End of duplicate groups===")
             print(f"Duplicates remaining: {len(g.f) - g.f.purge.sum()}")
         else:
             this_group = g.groups.iloc[g.group]
-            print(f"Duplicates remaining: {len(g.f) - g.f.purge.sum()}. This group contains {this_group['count']} files of {this_group['sum']/2**20:.2f} MB")
+            print(
+                f"Duplicates remaining: {g.groups['count'].sum()}. This group contains {this_group['count']} files of {this_group['sum'] / 2 ** 20:.2f} MB"
+            )
             for n, c in enumerate(choices, start=1):
                 print(f"{n}: {c}")
         prompt_string = "Enter (#) to keep, (N)ext, (Q)uit, (P)urge, (D)elete empty dirs, (S)ize order, (C)ount order"
         choice = input(prompt_string).lower()
-        if choice == 'q':
+        if choice == 'q':  # TODO: If duplicates are left then ask for confirmation
             quit_count += 1
             if g.f.purge.sum() <= 0:
                 break
             if quit_count == 2:
                 break
-            print(f"Warning: There are {g.f.purge.sum()} files marked to purge. Purge using (P)urge or press (Q)uit again to abandon.")
+            print(
+                f"Warning: There are {g.f.purge.sum()} files marked to purge. Purge using (P)urge or press (Q)uit again to abandon."
+            )
         elif choice == 'n':
             pass
         elif choice == 'p':
-            g.dup_purge()
-            g.find_dups()
+            if g.f.purge.sum() == 0:
+                print("No files identified for purge")
+                continue
+            print(f"There are {g.f.purge.sum()} files to purge. Purge?")
+            while True:
+                response = input("Purge? (Y/N)").lower()
+                if response == 'n':
+                    continue
+                if response == 'y':
+                    g.dup_purge()
+                    g.find_dups()
         elif choice == 'd':
             print(f"Removing empty dirs and recomputing duplicates.")
             remove_empty_dirs()
@@ -69,7 +82,7 @@ def control():
 
 
 class DeDup:
-    def __init__(self, roots):
+    def __init__(self, roots: List):
         self.roots = roots
         self.group = 0
         self.f = None
@@ -93,9 +106,7 @@ class DeDup:
                 'node_size': f.stat().st_size if f.is_file() else 0,
                 'purge': False,
             }
-            for f in itertools.chain(
-                Path(self.roots).glob('**/*'), [Path(self.roots)]
-            )  # TODO: Support list of target_dir
+            for f in itertools.chain(*[Path(p).rglob('*') for p in self.roots])
             if f.is_file()
         ]
         print(f"Total files: {len(files)}")
@@ -121,9 +132,10 @@ class DeDup:
                     hash.update(data)
             return hash.hexdigest()
 
-        self.f = self.f[self.f.duplicated('node_size', keep=False)].copy()
+        self.f = self.f.loc[self.f.duplicated('node_size', keep=False)]  # TODO: Eliminated .copy - watch for problems
         print(f"Potential duplicate files (same size): {self.f.shape[0]}. Computing MD5 sums...")
         self.f['hash'] = self.f.apply(hasher, axis=1)
+        self.f = self.f.loc[self.f.duplicated('hash', keep=False)]
         self.f['parent'] = self.f.path.apply(lambda p: p.parent)
 
     def find_dups(self):
@@ -154,10 +166,7 @@ class DeDup:
         dup_files = self.t.groupby('dups').filter(lambda x: len(set(x.parent)) == 1)
         if len(dup_files != 0):
             file_choices = (
-                dup_files.groupby('hash')
-                .apply(lambda x: tuple(x.path))
-                .reset_index()
-                .rename(columns={0: 'choices'})
+                dup_files.groupby('hash').apply(lambda x: tuple(x.path)).reset_index().rename(columns={0: 'choices'})
             )
             file_groups = (
                 dup_files.groupby(['parent', 'hash'])['node_size']
@@ -192,7 +201,7 @@ class DeDup:
         :returns None
         """
         g = self.groups.iloc[self.group, :]
-        purge_items = g.choices[:choice] + g.choices[choice + 1:]
+        purge_items = g.choices[:choice] + g.choices[choice + 1 :]
         if g.is_dir:
             self.f.loc[self.f.isin({'dups': g.choices, 'parent': purge_items}).parent, 'purge'] = True
         else:
@@ -206,25 +215,20 @@ class DeDup:
         offer confirmation with (at least) count of files and check that all checksums are accounted for
         :return: Number of files (and bytes?) deleted
         """
-        original_hashes = set(self.f.hash)
-        unpurged_hashes = set(self.f.loc[~self.f.purge, 'hash'])
-        if len(original_hashes ^ unpurged_hashes) != 0:
-            print("Whoa! Some content is deleted in all places. Risk of data loss - not going to purge. Sorry.")
-            sys.exit(1)
+        assert (
+            set(self.f.has) ^ set(self.f.local[~self.f.purge, 'hash']) == 0
+        ), "Whoa! Some content is deleted in all places. Risk of data loss - not going to purge. Sorry."
         purge_targets = self.f.loc[self.f.purge, 'path']
-        print(f"There are {len(purge_targets)} files to purge. Purge?")
-        while True:
-            response = input("Purge? (Y/N)").lower()
-            if response == 'n':
-                return False
-            if response == 'y':
-                print(f"Attempting to purge {len(purge_targets)} files")
-                for path in purge_targets:
-                    try:
-                        print(f"Deleting: {path}")
-                    except Exception as e:  # TODO:  Too broad; figure out delete failures
-                        print(f"Skipping {path} because of error: {e}")
-                return True
+        for path in purge_targets:
+            try:
+                print(f"Deleting: {path}")
+                # path.unlink()
+                self.f = self.f.query("path != @path")
+            except Exception as e:  # TODO:  Too broad; figure out delete failures
+                print(f"Skipping {path} because of error: {e}")
+        self.f = self.f.loc[self.f.duplicated('node_size', keep=False)]  # TODO: Watch for .copy required
+        return
+
 
 def remove_empty_dirs():
     """
