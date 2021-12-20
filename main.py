@@ -3,24 +3,27 @@ import os
 import sys
 from hashlib import md5
 from pathlib import Path
-from enum import Enum
+import stat
 
 import pandas as pd
 from typing import List
+import typer
 
-target_dirs = [r"C:\Users\Scott\Pictures\Saved Pictures"]
+# target_dirs = [r"C:\Users\Scott\Pictures\Saved Pictures"]
 # target_dirs = [
 #     r"C:\Users\Scott\Pictures\2016-07-01 for Scott to Deal With",
 #     r"C:\Users\Scott\Pictures\Pictures for Droid",
 #     r"C:\Users\Scott\Pictures\Saved Pictures",
 # ]
+# target_dirs = [
+#     r"C:\Users\Scott\Documents\Programming\dupedirs\Test Dirs 1",
+#     r"C:\Users\Scott\Documents\Programming\dupedirs\Test Dirs 2",
+# ]
 
-# TODO:  Implement CLI
 
-
-def control():
+def control(target_dirs: List[str]):
     """
-    Provides interactive user interface to the application.
+    Implements the 'controller' and 'view'. Provides interactive user interface to the application.
     """
 
     class Menu:
@@ -40,7 +43,7 @@ def control():
             self.command = "(#) to keep"
 
         def go(self, choice):
-            if choice.isnumeric() and (1 <= int(choice) <= len(self.model.groups.choices[0])):
+            if choice.isnumeric() and (1 <= int(choice) <= len(self.model.groups.iloc[self.model.group]['choices'])):
                 self.model.mark_group(int(choice) - 1)
                 return True
             return True
@@ -48,7 +51,7 @@ def control():
     class Quit(Menu, keycode='q'):
         def __init__(self, model):
             self.model = model
-            self.command = "{Q}uit"
+            self.command = "(Q)uit"
             self.quit_count = 0
 
         def go(self, choice):
@@ -60,32 +63,28 @@ def control():
             if self.quit_count >= 2:
                 return False
             notice = f"#####Warning: There are {self.model.f.purge.sum()} files marked to purge. Purge using (P)urge or press (Q)uit again to abandon."
-            print('#' * len(notice))
-            print(notice)
-            print("#" * len(notice))
+            typer.echo('#' * len(notice))
+            typer.echo(notice)
+            typer.echo("#" * len(notice))
             return True
 
     class Purge(Menu, keycode='p'):
         def __init__(self, model):
             self.model = model
-            self.command = "{P)urge"
+            self.command = "(P)urge"
 
         def go(self, choice):
             if choice != self.keycode:
                 return True
             if self.model.f.purge.sum() == 0:
-                print("No files have been marked for purge")
+                typer.echo("No files have been marked for purge")
                 return True
-            print(f"There are {self.model.f.purge.sum()} files marked to purge. Purge?")
+            typer.echo(f"There are {self.model.f.purge.sum()} files marked to purge.")
             while True:
-                response = input("Purge? (Y/N)").lower()  # TODO: This shold be a Typer function
-                if response == 'n':
-                    self.model.group -= 1  # Back off choice counter; nothing has changed in choices
-                    return True
-                if response == 'y':
+                if typer.confirm("Purge?"):
                     self.model.dup_purge()
                     self.model.find_dups()
-                    return True
+                return True
 
     class Next(Menu, keycode='n'):
         def __init__(self, model):
@@ -98,7 +97,7 @@ def control():
             self.model.group += 1
             return True
 
-    class RmEmptyDirs(Menu, keycode='d'):  # TODO: This needs to be adapted to list of target dirs
+    class RmEmptyDirs(Menu, keycode='d'):
         def __init__(self, model):
             self.model = model
             self.command = "(D)elete empty dirs"
@@ -106,8 +105,8 @@ def control():
         def go(self, choice):
             if choice != self.keycode:
                 return True
-            print(f"Removing empty dirs and recomputing duplicates.")
-            remove_empty_dirs()
+            typer.echo(f"Removing empty dirs and recomputing duplicates.")
+            remove_empty_dirs(self.model.roots)
             self.model.find_dups()
             return True
 
@@ -119,8 +118,8 @@ def control():
         def go(self, choice):
             if choice != self.keycode:
                 return True
-            print("")
-            print("Sorting by duplicate size.")
+            typer.echo("")
+            typer.echo("Sorting by duplicate size.")
             self.model.priority = 'sum'
             self.model.find_dups()
             return True
@@ -133,9 +132,20 @@ def control():
         def go(self, choice):
             if choice != self.keycode:
                 return True
-            print("Sorting by duplicate count.")
+            typer.echo("Sorting by duplicate count.")
             self.model.priority = 'count'
             self.model.find_dups()
+            return True
+
+    class Restart(Menu, keycode='r'):
+        def __init__(self, model):
+            self.model = model
+            self.command = "(R)estart"
+
+        def go(self, choice):
+            if choice != self.keycode:
+                return True
+            self.model.group = 0
             return True
 
     g = DeDup(target_dirs)
@@ -143,34 +153,36 @@ def control():
     prompt = ' '.join(c.command for c in cmd)
     while True:
         # TODO: Make this look better on quit while files left to purge
-        if len(g.groups) < 1:
-            print("#################################")
-            print("#####End of duplicate groups#####")
-            print("#################################")
-            print(f"Duplicates remaining: {g.f[~g.f['purge']].duplicated('hash', keep=False).sum()}")
+        if (len(g.groups) < 1) or g.group > (len(g.groups) - 1):
+            typer.secho("#################################", fg=typer.colors.RED)
+            typer.secho("#####End of duplicate groups#####", fg=typer.colors.RED)
+            typer.secho("#################################", fg=typer.colors.RED)
+            typer.echo(f"Duplicates remaining: {g.f[~g.f['purge']].duplicated('hash', keep=False).sum()}")
         else:
             current_group = g.groups.iloc[g.group]
-            print("==========================")
-            print(
+            typer.echo("=" * 25)
+            typer.echo(
                 f"Duplicates remaining: {g.groups['count'].sum()}. This group contains {current_group['count']} files of {current_group['sum'] / 2 ** 20:.2f} MB"
             )
             for n, c in enumerate(current_group.choices, start=1):
-                print(f"{n}: {c}")
-        choice = input(prompt).lower()  # TODO: This should be part of Typer
-        dog = [c.go(choice) for c in cmd]
-        if not all(dog):
+                typer.echo(f"{n}: {c}")
+        choice = typer.prompt(prompt).lower()
+        # choice = input(prompt).lower()  # TODO: This should be part of Typer
+        if not all([c.go(choice) for c in cmd]):
             break
-    print("Done")
+    typer.echo("Done")
 
 
 class DeDup:
+    """
+    This class is the data model, and all operations that occur on the data model
+    """
     def __init__(self, roots: List):
         self.roots = roots
         self.group = 0
-        self.f = None
-        self.t = None
-        self.fileset = None
-        self.groups = None
+        self.f = pd.DataFrame()
+        self.t = pd.DataFrame()
+        self.groups = pd.DataFrame()
         self.priority = 'sum'
         self.verbose = False  # TODO: Implement in print statements
         self.scan_filesystem()
@@ -181,27 +193,31 @@ class DeDup:
         """
         Scans filesystem and creates dataframe for deduplication
         """
-        print("Scanning in filesystem tree...")
+        typer.echo("Scanning in filesystem tree...")
         files = [
             {
                 'path': f,
                 'node_size': f.stat().st_size if f.is_file() else 0,
                 'purge': False,
             }
-            for f in itertools.chain(*[Path(p).rglob('*') for p in self.roots])
+            for f in itertools.chain.from_iterable([Path(p).rglob('*') for p in self.roots])
             if f.is_file()
         ]
-        print(f"Total files: {len(files)}")
+        typer.echo(f"Total files: {len(files)}")
         self.f = pd.DataFrame(files)
         return None
 
     def hash_potential_duplicates(self):
+        if len(self.f) == 0:
+            return None
+
         def hasher(record):
             """
             Compute hash based on file size to avoid running out of memory
             :param record: Record for a file containing "path" element
             :return: hash:
             """
+
             if record.node_size <= 100e6:
                 return md5(record.path.read_bytes()).hexdigest()
             BUF_SIZE = 65536
@@ -215,10 +231,17 @@ class DeDup:
             return hash.hexdigest()
 
         self.f = self.f.loc[self.f.duplicated('node_size', keep=False)]
-        print(f"Potential duplicate files (same size): {self.f.shape[0]}. Computing MD5 sums...")
+        typer.echo(f"Potential duplicate files (same size): {self.f.shape[0]}.")
+        if len(self.f) == 0:
+            return None
+        typer.echo(" Computing MD5 sums...")
         self.f['hash'] = self.f.apply(hasher, axis=1)
         self.f = self.f.loc[self.f.duplicated('hash', keep=False)]
+        if len(self.f) == 0:
+            typer.echo("No duplicates found")
+            return None
         self.f['parent'] = self.f.path.apply(lambda p: p.parent)
+        return None
 
     def find_dups(self):
         """
@@ -227,7 +250,8 @@ class DeDup:
         order by filecount or totalsize as user cofigured
         :return:
         """
-        self.group = 0
+        if len(self.f) == 0:
+            return None
         self.t = self.f.loc[~self.f.purge]
         if not len(self.t):
             return None
@@ -263,18 +287,6 @@ class DeDup:
             self.groups = self.groups.sort_values(self.priority, ascending=False)
         return None
 
-    # def get_choices(self):
-    #     """
-    #     Manages returns choices for each duplicate group
-    #     :return: choices, None on end of duplicate groups
-    #     """
-    #     if len(self.groups) == 0:
-    #         return None
-    #     if self.group < 0 or self.group > (len(self.groups) - 1):
-    #         return None
-    #     self.groups = self.groups.sort_values(self.priority, ascending=False)
-    #     return self.groups.iloc[self.group]['choices']
-
     def mark_group(self, choice):
         """
         Given group and choice marks files for deletion
@@ -283,12 +295,13 @@ class DeDup:
         :returns None
         """
         g = self.groups.iloc[self.group, :]
-        purge_items = g.choices[:choice] + g.choices[choice + 1 :]
+        purge_items = g.choices[:choice] + g.choices[choice + 1:]
         if g.is_dir:
             self.f.loc[self.f.isin({'dups': g.choices, 'parent': purge_items}).parent, 'purge'] = True
         else:
             self.f.loc[self.f.path.isin(purge_items), 'purge'] = True
         self.find_dups()
+        self.is_purge_safe()
         return None
 
     def dup_purge(self):
@@ -297,32 +310,53 @@ class DeDup:
         offer confirmation with (at least) count of files and check that all checksums are accounted for
         :return: Number of files (and bytes?) deleted
         """
-        assert set(self.f.hash) == set(
-            self.f.loc[~self.f.purge, 'hash']
-        ), "Whoa! Some content is deleted in all places. Risk of data loss - not going to purge. Sorry."
+        self.is_purge_safe()
         purge_targets = self.f.loc[self.f.purge, 'path']
         for path in purge_targets:
             try:
-                print(f"Deleting: {path}")
-                # path.unlink()
+                typer.echo(f"Deleting: {path}")
+                path.unlink()
                 self.f = self.f.query("path != @path")
             except Exception as e:  # TODO:  Too broad; figure out delete failures
-                print(f"Skipping {path} because of error: {e}")
-        self.f = self.f.loc[self.f.duplicated('node_size', keep=False)]  # TODO: Watch for .copy required
+                typer.echo(f"Skipping {path} because of error: {e}")
+        self.f = self.f.loc[self.f.duplicated('node_size', keep=False)]
         return
 
+    def is_purge_safe(self):
+        """
+        Confirms that at least one copy of each hash remains if files marked for purge are eliminted
+        :return: True if at least one copy remains, False if all copies of a given hash are marked for purge
+        """
+        # Problematic:  {'392ef306582b9fe4da6b0b120cad7598', 'f073d3db9c07887b3cb2e606effec57a'}
+        if set(self.f.hash) != set(self.f.loc[~self.f.purge, 'hash']):
+            print("Whoa! Some content is deleted in all places. Risk of data loss - not going to purge. Sorry.")
+            print(set(self.f.hash) - set(self.f.loc[~self.f.purge, 'hash']))
+            print(set(self.f.loc[~self.f.purge, 'hash']) - set(self.f.hash))
+            assert False, "Purge safe check failed"
 
-def remove_empty_dirs():
+
+# def audit_dir_removed(event, args):
+#     typer.echo(f'audit: {event} with args={args}')
+
+def remove_empty_dirs(target_dirs):
     """
     Removes empty dirs and announces number of dirs removed
     :returns None
     """
-    print("Removing empty directories...", end='')
-    [os.removedirs(p) for p in Path(target_dir).glob('**/*') if p.is_dir() and len(list(p.iterdir())) == 0]
-    print("Done.")
+
+    typer.echo("Removing empty directories...")
+    # sys.addaudithook(audit_dir_removed)
+
+    all_dirs = [p for p in itertools.chain(*[Path(r).rglob('*') for r in target_dirs]) if p.is_dir()] + [
+        Path(p) for p in target_dirs
+    ]
+    empty_dirs = [p for p in all_dirs if len(list(p.iterdir())) == 0]
+    [os.chmod(p, stat.S_IWRITE) for p in all_dirs]
+    [os.removedirs(p) for p in empty_dirs]
+    typer.echo("Done.")
     return None
 
 
 if __name__ == '__main__':
-    control()
-    print("Goodbye")
+    typer.run(control)
+    typer.echo("Goodbye")
